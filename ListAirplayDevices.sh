@@ -3,17 +3,29 @@
 # MacOS 15.7.4 Sequoia - Discover AirPlay devices and speak the list
 # Saves device mapping to ~/.airplay_devices for ConnectAirplay.sh
 
-DEVICE_FILE="$HOME/.airplay_devices"
-bonjour_tmp=$(mktemp)
-uuid_tmp=$(mktemp)
-DISCOVERY_MAX_SECONDS=30
-DNS_SD_SECONDS=4
+readonly DEVICE_FILE="$HOME/.airplay_devices"
+readonly bonjour_tmp=$(mktemp)
+readonly uuid_tmp=$(mktemp)
+readonly DISCOVERY_MAX_SECONDS=30
+readonly DNS_SD_SECONDS=4
+
+info() {
+    printf '%s\n' "$*"
+}
+
+warn() {
+    printf 'Warning: %s\n' "$*" >&2
+}
+
+error() {
+    printf 'Error: %s\n' "$*" >&2
+}
 
 cleanup() {
-    pkill -P "$chime_pid" 2>/dev/null
-    kill "$chime_pid" 2>/dev/null
-    wait "$chime_pid" 2>/dev/null
-    rm -f "$bonjour_tmp" "$uuid_tmp"
+    pkill -P "${chime_pid:-}" 2>/dev/null || true
+    kill "${chime_pid:-}" 2>/dev/null || true
+    wait "${chime_pid:-}" 2>/dev/null || true
+    rm -f "${bonjour_tmp:-}" "${uuid_tmp:-}"
 }
 trap cleanup EXIT
 
@@ -137,7 +149,7 @@ while (( SECONDS - start < DISCOVERY_MAX_SECONDS )); do
     attempt=$((attempt + 1))
     if (( attempt > 1 )); then
         nudge_bonjour
-        echo "Still searching for AirPlay devices... (${attempt}, $((SECONDS - start))s / ${DISCOVERY_MAX_SECONDS}s)" >&2
+        warn "Still searching for AirPlay devices... (${attempt}, $((SECONDS - start))s / ${DISCOVERY_MAX_SECONDS}s)"
         sleep 2
     fi
 
@@ -153,12 +165,12 @@ while (( SECONDS - start < DISCOVERY_MAX_SECONDS )); do
 done
 
 if ! grep -qE 'screen-mirroring-device-' <<< "$device_uuids"; then
-    echo "No screen mirroring devices available (after ${DISCOVERY_MAX_SECONDS}s)." >&2
+    error "No screen mirroring devices available (after ${DISCOVERY_MAX_SECONDS}s)."
     exit 1
 fi
 
 if [[ ${#bonjour_psis[@]} -eq 0 ]]; then
-    echo "Note: Bonjour did not list devices yet; names may show as Unknown." >&2
+    warn "Bonjour did not list devices yet; names may show as Unknown."
 fi
 
 lookup_name() {
@@ -169,11 +181,11 @@ lookup_name() {
         local name="${entry%%|*}"
         local key="${entry##*|}"
         if [[ "$ax_norm" == "$key" ]]; then
-            echo "$name"
+            info "$name"
             return
         fi
     done
-    echo "Unknown ($1)"
+    info "Unknown ($1)"
 }
 
 # Build device list and save to file
@@ -185,12 +197,12 @@ while IFS= read -r axid || [[ -n "$axid" ]]; do
     uuid="${axid##*AirPlay:}"
     name=$(lookup_name "$uuid")
     display_names+=("$name")
-    echo "$axid|$name" >> "$DEVICE_FILE"
+    printf '%s|%s\n' "$axid" "$name" >> "$DEVICE_FILE"
 done <<< "$device_uuids"
 
-pkill -P "$chime_pid" 2>/dev/null
-kill "$chime_pid" 2>/dev/null
-wait "$chime_pid" 2>/dev/null
+pkill -P "${chime_pid:-}" 2>/dev/null || true
+kill "${chime_pid:-}" 2>/dev/null || true
+wait "${chime_pid:-}" 2>/dev/null || true
 
 if [[ "${1:-}" == "--list-only" ]]; then
     for i in "${!display_names[@]}"; do
@@ -206,11 +218,17 @@ for i in "${!display_names[@]}"; do
 done
 say "$speech"
 
-echo "$speech"
+info "$speech"
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
 connect_script="$script_dir/ConnectAirplay.sh"
-selection_prompt="Choose device (1-${#display_names[@]}): "
+if (( ${#display_names[@]} < 10 )); then
+    readonly selection_prompt="Choose device (1-${#display_names[@]}), press a number: "
+    readonly selection_read_flags='-rsn1'
+else
+    readonly selection_prompt="Choose device (1-${#display_names[@]}), type number and press Enter: "
+    readonly selection_read_flags='-rs'
+fi
 terminal_output=''
 for i in "${!display_names[@]}"; do
     terminal_output+=$(printf '  %d) %s\n' "$((i + 1))" "${display_names[$i]}")
@@ -218,16 +236,17 @@ done
 terminal_output+=$'\n'
 
 if [[ -t 0 ]]; then
-    read -rsn1 -p "$selection_prompt" selection </dev/tty
-    echo
+    read "$selection_read_flags" -p "$selection_prompt" selection </dev/tty || exit 1
+    printf '\n'
 else
-    printf -v inner_cmd 'clear; printf %%s %q; read -rsn1 -p %q selection; printf "\\n"; if [[ "$selection" =~ ^[1-%d]$ ]]; then %q "$selection"; ec=$?; osascript -e '"'"'tell application "Terminal" to close (selected tab of front window)'"'"'; exit $ec; fi; printf "Invalid choice: %%s\\n" "$selection"; sleep 2; osascript -e '"'"'tell application "Terminal" to close (selected tab of front window)'"'"'; exit 1' \
+    printf -v inner_cmd 'clear; printf %%s %q; read %s -p %q selection </dev/tty || exit 1; printf "\\n"; if [[ "$selection" =~ ^[0-9]+$ ]] && (( selection >= 1 && selection <= %d )); then %q "$selection"; ec=$?; osascript -e '"'"'tell application "Terminal" to close (selected tab of front window)'"'"' >/dev/null 2>&1; exit $ec; fi; printf "Error: Invalid choice: %%s\\n" "$selection" >&2; sleep 2; osascript -e '"'"'tell application "Terminal" to close (selected tab of front window)'"'"' >/dev/null 2>&1; exit 1' \
         "$terminal_output" \
+        "$selection_read_flags" \
         "$selection_prompt" \
         "${#display_names[@]}" \
         "$connect_script"
     printf -v terminal_cmd 'bash -lc %q' "$inner_cmd"
-    osascript - "$terminal_cmd" <<'APPLESCRIPT' 2>/dev/null
+    osascript - "$terminal_cmd" <<'APPLESCRIPT' >/dev/null 2>&1
 on run argv
     tell application "Terminal"
         activate
@@ -238,6 +257,6 @@ APPLESCRIPT
     exit 0
 fi
 
-if [[ -n "$selection" ]]; then
+if [[ -n "${selection:-}" ]]; then
     exec "$(dirname "$0")/ConnectAirplay.sh" "$selection"
 fi
