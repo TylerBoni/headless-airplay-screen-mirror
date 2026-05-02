@@ -1,18 +1,23 @@
 #!/bin/bash
+set -eo pipefail
 
 # MacOS 15.7.4 Sequoia - Connect to an AirPlay device by number
 # Reads device mapping from ~/.airplay_devices (written by ListAirplayDevices.sh)
 
-DEVICE_FILE="$HOME/.airplay_devices"
-choice="$1"
+readonly DEVICE_FILE="$HOME/.airplay_devices"
+readonly choice="${1:-}"
+
+error() {
+    printf 'Error: %s\n' "$*" >&2
+}
 
 if [[ -z "$choice" ]]; then
-    echo "Usage: ConnectAirplay.sh <number>"
+    printf 'Usage: ConnectAirplay.sh <number>\n' >&2
     exit 1
 fi
 
 if [[ ! -f "$DEVICE_FILE" ]]; then
-    echo "No device list found. Run ListAirplayDevices.sh first."
+    error "No device list found. Run ListAirplayDevices.sh first."
     exit 1
 fi
 
@@ -24,13 +29,13 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     names+=("${line#*|}")
 done < "$DEVICE_FILE"
 
-if (( choice < 1 || choice > ${#devices[@]} )); then
-    echo "Invalid choice: $choice (1-${#devices[@]})"
+if [[ ! "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#devices[@]} )); then
+    error "Invalid choice '$choice' (1-${#devices[@]})"
     exit 1
 fi
 
-chosen_id="${devices[$((choice - 1))]}"
-chosen_name="${names[$((choice - 1))]}"
+readonly chosen_id="${devices[$((choice - 1))]}"
+readonly chosen_name="${names[$((choice - 1))]}"
 
 say "Connecting to $chosen_name" &
 
@@ -96,7 +101,7 @@ on run argv
 end run
 APPLESCRIPT
 
-if ! osascript "$script_tmp" "$chosen_id"; then
-    echo "Could not find that device in Screen Mirroring (list may be stale). Run ListAirplayDevices.sh again." >&2
+if ! osascript "$script_tmp" "$chosen_id" >/dev/null 2>&1; then
+    error "Could not find that device in Screen Mirroring (list may be stale). Run ListAirplayDevices.sh again."
     exit 1
 fi
